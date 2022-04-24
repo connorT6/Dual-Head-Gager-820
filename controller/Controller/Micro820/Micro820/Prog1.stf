@@ -1,0 +1,208 @@
+PROGRAM Prog1
+
+
+IF _IO_EM_DI_06 AND NOT L_state_bottle_sensor THEN // L_state_bottle_sensor saves the previous value for determining the rising edge
+	check_bottle_status := TRUE;
+END_IF;
+L_state_bottle_sensor := _IO_EM_DI_06;
+
+
+
+IF check_bottle_status THEN  // When bottle passed
+
+	// shifting bit by 1 to the right on all
+	VALS_BT_AVAILABLE := SHR(VALS_BT_AVAILABLE,1);
+	VALS_PLUG_OK := SHR(VALS_PLUG_OK,1);
+	VALS_TOP_OK := SHR(VALS_TOP_OK,1);
+	
+	//---------------------------- processing current bottles data -------------------
+	
+	IF NOT plug_error THEN // adding plug status to the values
+		VALS_PLUG_OK := OR_MASK(VALS_PLUG_OK,SHL(1,(VAL_NO_OF_BOTTLE - 2))); // (VAL_NO_OF_BOTTLE - 2) because of the one bottle difference
+	ELSE
+		plug_error := FALSE;
+	END_IF;
+	
+	IF NOT no_bottle THEN // if bottle is available
+		VALS_BT_AVAILABLE := OR_MASK(VALS_BT_AVAILABLE,SHL(1,(VAL_NO_OF_BOTTLE - 1))); // setting bottle available values
+		SCALE_1(a_value,0.0,4095.0,SENSOR_MIN_PRES_LIMIT,SENSOR_MAX_PRES_LIMIT); // scaling analog value to pressure
+		IF (SCALE_1.Output >= MIN_PRESSURE) THEN  //checking pressure value is ok
+			VALS_TOP_OK := OR_MASK(VALS_TOP_OK,SHL(1,(VAL_NO_OF_BOTTLE - 1)));
+		END_IF;
+		check_bottle_status := FALSE;
+	ELSE
+		no_bottle:= FALSE;
+	END_IF;
+	
+	a_value := 0.0; // setting maximum analog value to 0 to get the next value
+	
+	//*------------------------ end processing current bottles data -------------------
+	
+	//---------------------------- processing bottle near the rejector ---------------------
+	
+	last_bt_available := ANY_TO_BOOL(AND_MASK(VALS_BT_AVAILABLE,1)); // checking is the last bottle available
+	
+	IF last_bt_available THEN
+		last_bt_plug_ok := ANY_TO_BOOL(AND_MASK(VALS_PLUG_OK,1));
+		last_bt_tip_ok := ANY_TO_BOOL(AND_MASK(VALS_TOP_OK,1));
+		count_total := count_total + 1;    // increasing bottle count
+		IF NOT last_bt_plug_ok OR NOT last_bt_tip_ok THEN   // if the bottle is defect start timer & switch on ejector
+			TP_ON := TRUE;  // setting value for reject width timer
+			count_edj_all := count_edj_all + 1;
+			IF NOT last_bt_plug_ok THEN
+				count_edj_plug_error := count_edj_plug_error + 1;
+			END_IF;
+			IF NOT last_bt_tip_ok THEN
+				count_edj_tip_error := count_edj_tip_error + 1;
+			END_IF;
+		END_IF;
+	END_IF;
+	//------------------------ end processing bottle near the rejector ---------------------
+	
+END_IF;
+
+IF _IO_EM_AI_00 > ANY_TO_WORD(a_value) THEN // getting maximum value of pressure input
+	a_value := ANY_TO_REAL(_IO_EM_AI_00);
+END_IF;
+
+IF _IO_EM_DI_05 THEN // plug input
+	plug_error := TRUE;
+END_IF;
+
+IF _IO_EM_DI_04 THEN // no bottle
+	no_bottle := TRUE;
+END_IF;
+
+TP_1(TP_ON,rej_width); // reject width timer
+IF TP_ON THEN           // for switching off timer en value (reject width timer)
+	TP_ON := FALSE;
+END_IF;
+
+IF TP_1.Q THEN  // switching ejector according to the timer output
+	_IO_EM_DO_00 := TRUE;
+ELSE
+	_IO_EM_DO_00 := FALSE;
+END_IF;
+
+IF _IO_EM_DI_07 THEN // resetting counters
+	count_total := 0;
+	count_edj_all := 0;
+	count_edj_tip_error := 0;
+	count_edj_plug_error := 0;
+END_IF;
+
+//----------------------------------- value adjust code -----------------------
+// depends on currently displayed menu
+IF disp_mode = 1 THEN
+	SCALE_2(ANY_TO_REAL(_IO_EM_AI_01),50.0,4000.0,SENSOR_MIN_PRES_LIMIT,SENSOR_MAX_PRES_LIMIT);
+	IF temp_scale2_out = 0.0 THEN
+		temp_scale2_out := SCALE_2.Output;
+	END_IF;
+	
+	// if the potentiometer is rotated after the value is set. then the final set value will be showed until adjusted
+	IF temp_scale2_out > MIN_PRESSURE + 0.2 OR temp_scale2_out < MIN_PRESSURE - 0.2 THEN 
+		IF temp_scale2_out +0.1 <= SCALE_2.Output OR temp_scale2_out - 0.1 >= SCALE_2.Output THEN
+			MIN_PRESSURE := SCALE_2.Output;
+			temp_scale2_out := SCALE_2.Output;
+		END_IF;
+	ELSE
+		MIN_PRESSURE := SCALE_2.Output;
+		temp_scale2_out := SCALE_2.Output; 
+	END_IF;
+	temp_scale3_out := 0.0;
+	temp_scale4_out := 0.0;
+ELSIF disp_mode = 2 THEN
+	SCALE_3(ANY_TO_REAL(_IO_EM_AI_02), 0.0, 4000.0, 0.001, LIMIT_MAX_REJ_WID_T); // rej width
+	SCALE_4(ANY_TO_REAL(_IO_EM_AI_03), 0.0, 4000.0, 0.001, LIMIT_MAX_REJ_OFF); // rej offset
+	
+	IF temp_scale3_out = 0.0 THEN
+		temp_scale3_out := SCALE_3.Output;
+	END_IF;
+	
+	IF temp_scale4_out = 0.0 THEN
+		temp_scale4_out := SCALE_4.Output;
+	END_IF;
+	// same as display mode 1
+	IF temp_scale3_out > ANY_TO_REAL(rej_width) + 100.0 OR temp_scale3_out < ANY_TO_REAL(rej_width) - 100.0 THEN 
+		IF temp_scale3_out + 20.0 <= SCALE_3.Output OR temp_scale3_out - 20.0 >= SCALE_3.Output THEN
+			rej_width := ANY_TO_TIME(SCALE_3.Output);
+			temp_scale3_out := SCALE_3.Output;
+		END_IF;
+	ELSE
+		rej_width := ANY_TO_TIME(SCALE_3.Output);
+		temp_scale3_out := SCALE_3.Output;
+	END_IF;  
+	
+	IF temp_scale4_out > ANY_TO_REAL(rej_offset) + 100.0 OR temp_scale4_out < ANY_TO_REAL(rej_offset) - 100.0 THEN 
+		IF temp_scale4_out + 20.0 <= SCALE_4.Output OR temp_scale4_out - 20.0 >= SCALE_4.Output THEN
+			rej_offset := ANY_TO_TIME(SCALE_4.Output);
+			temp_scale4_out := SCALE_4.Output;
+		END_IF;
+	ELSE
+		rej_offset := ANY_TO_TIME(SCALE_4.Output);
+		temp_scale4_out := SCALE_4.Output;
+	END_IF;
+	temp_scale2_out := 0.0;
+ELSIF disp_mode = 0 THEN
+	temp_scale2_out := 0.0;
+	temp_scale3_out := 0.0;
+	temp_scale4_out := 0.0;
+END_IF;
+//------------------------------- end value adjust code -----------------------
+
+//------------------------------- Control By LCD Menu ------------------------------
+LCD_READ(TRUE);
+
+keyData := ANY_TO_DINT(LCD_READ.KeyData);
+
+IF ANY_TO_BOOL(AND_MASK(keyData, SHL(1,BIT_NO_UP))) AND NOT ANY_TO_BOOL(AND_MASK(last_LCD_keydata,SHL(1,BIT_NO_UP))) THEN
+	IF disp_mode >= 2 THEN
+		disp_mode := 0;
+	ELSE
+		disp_mode := disp_mode + 1;
+	END_IF;
+ELSIF ANY_TO_BOOL(AND_MASK(keyData, SHL(1,BIT_NO_DOWN))) AND NOT ANY_TO_BOOL(AND_MASK(last_LCD_keydata,SHL(1,BIT_NO_DOWN))) THEN
+	IF disp_mode = 0 THEN
+		disp_mode := 2;
+	ELSE
+		disp_mode := disp_mode - 1;
+	END_IF;
+ELSIF ANY_TO_BOOL(AND_MASK(keyData, SHL(1,BIT_NO_F1))) AND NOT ANY_TO_BOOL(AND_MASK(last_LCD_keydata,SHL(1,BIT_NO_F1))) THEN
+	disp_mode := 0;
+ELSIF ANY_TO_BOOL(AND_MASK(keyData, SHL(1,BIT_NO_F2))) AND NOT ANY_TO_BOOL(AND_MASK(last_LCD_keydata,SHL(1,BIT_NO_F2))) THEN
+	disp_mode := 1;
+ELSIF ANY_TO_BOOL(AND_MASK(keyData, SHL(1,BIT_NO_F3))) AND NOT ANY_TO_BOOL(AND_MASK(last_LCD_keydata,SHL(1,BIT_NO_F3))) THEN
+	disp_mode := 2;
+END_IF;
+
+last_LCD_keydata := ANY_TO_DINT(LCD_READ.KeyData);
+
+
+
+
+//----------------------------- End Control By LCD Menu ------------------------------
+
+// --------------------------- LCD Display Code -------------------------------------
+
+IF disp_mode=0 THEN  // displaying bottle count
+	lcd_line1 := 'CHECKED : ' + ANY_TO_STRING(count_total);
+	lcd_line2 := 'EDJ TIP : ' + ANY_TO_STRING(count_edj_tip_error);
+	lcd_line3 := 'EDJ PLG : ' + ANY_TO_STRING(count_edj_plug_error);
+	lcd_line4 := 'EDJ ALL : ' + ANY_TO_STRING(count_edj_all);
+ELSIF disp_mode = 1 THEN  // pressure menu
+	lcd_line1 := 'PRESSURE LIMIT ADJUST';
+	lcd_line2 := 'NORMAL PRESS  : ' + ANY_TO_STRING(MIN_PRESSURE);
+	lcd_line3 := 'REJ PRESS LIM : ' + ANY_TO_STRING(MIN_PRESSURE);
+	lcd_line4 := 'CUR BT MAX PRS: ' + ANY_TO_STRING(a_value);
+ELSIF disp_mode = 2 THEN  // time menu
+	lcd_line1 := 'REJECT TIMER ADJUST';
+	lcd_line2 := 'REJ WIDTH : ' + ANY_TO_STRING(rej_width);
+	lcd_line3 := 'REJ OFFST : ' + ANY_TO_STRING(rej_offset);  
+	lcd_line4 := ' ';
+END_IF;
+
+
+LCD_1(TRUE,0,lcd_line1,lcd_line2,lcd_line3,lcd_line4,,,,);
+
+// ----------------------------------------------------------------------------------
+END_PROGRAM
